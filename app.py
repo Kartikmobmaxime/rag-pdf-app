@@ -8,22 +8,23 @@ from typing import List, Dict, Any
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pypdf import PdfReader
-import openai
+from openai import AzureOpenAI, ChatCompletion
+import re
 
 # ---------------------------
 # Configuration
 # ---------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Set OPENAI_API_KEY environment variable before running the app.")
-openai.api_key = OPENAI_API_KEY
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = ""
+CHAT_MODEL_URL="https://legio-mdx0gh9f-eastus2.cognitiveservices.azure.com/"
+CHAT_MODEL_VERSION="2024-12-01-preview"
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Embedding model to use with OpenAI (change if you want different model)
-EMBEDDING_MODEL = "text-embedding-3-small"  # stable embedding choice
-LLM_MODEL = "gpt-3.5-turbo"                # chat model for answers
+EMBEDDING_MODEL = "text-embedding-3-large"  # stable embedding choice
+LLM_MODEL = "gpt-4o-mini"                # chat model for answers
 
 # ---------------------------
 # Helper functions
@@ -39,41 +40,103 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
             pages_text.append(txt)
     return "\n\n".join(pages_text)
 
-def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> List[str]:
+# def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> List[str]:
+#     """
+#     Very simple character-based chunking.
+#     - max_chars: how many characters per chunk (~approx tokens).
+#     - overlap: overlapping characters between chunks to preserve context.
+#     """
+#     if not text:
+#         return []
+#     chunks = []
+#     start = 0
+#     length = len(text)
+#     while start < length:
+#         end = min(start + max_chars, length)
+#         chunk = text[start:end].strip()
+#         if chunk:
+#             chunks.append(chunk)
+#         start = end - overlap
+#         if start < 0:
+#             start = 0
+#         if start >= length:
+#             break
+#     return chunks
+
+def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str]:
     """
-    Very simple character-based chunking.
-    - max_chars: how many characters per chunk (~approx tokens).
-    - overlap: overlapping characters between chunks to preserve context.
+    Chunk text by sentences instead of raw characters.
+    Keeps chunks within max_chars, with optional overlap for context.
     """
     if not text:
         return []
+    
+    # Split by sentence-ish boundaries
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
-    start = 0
-    length = len(text)
-    while start < length:
-        end = min(start + max_chars, length)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        start = end - overlap
-        if start < 0:
-            start = 0
-        if start >= length:
-            break
+    current_chunk = ""
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) + 1 <= max_chars:
+            current_chunk += " " + sentence
+        else:
+            # Save the current chunk
+            chunks.append(current_chunk.strip())
+            
+            # Start new chunk, include overlap
+            if overlap > 0 and chunks:
+                overlap_text = current_chunk[-overlap:]
+                current_chunk = overlap_text + " " + sentence
+            else:
+                current_chunk = sentence
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
     return chunks
+
+
+# def embed_texts_openai(texts: List[str]) -> List[List[float]]:
+#     """Call OpenAI embeddings API in batches and return list of vectors."""
+#     if not texts:
+#         return []
+#     embeddings: List[List[float]] = []
+#     batch_size = 50
+#     for i in range(0, len(texts), batch_size):
+#         batch = texts[i:i+batch_size]
+#         resp = openai.Embedding.create(model=EMBEDDING_MODEL, input=batch)
+#         batch_emb = [item["embedding"] for item in resp["data"]]
+#         embeddings.extend(batch_emb)
+#     return embeddings
+
 
 def embed_texts_openai(texts: List[str]) -> List[List[float]]:
     """Call OpenAI embeddings API in batches and return list of vectors."""
     if not texts:
         return []
+    
     embeddings: List[List[float]] = []
     batch_size = 50
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i+batch_size]
-        resp = openai.Embedding.create(model=EMBEDDING_MODEL, input=batch)
-        batch_emb = [item["embedding"] for item in resp["data"]]
-        embeddings.extend(batch_emb)
-    return embeddings
+    print("start embed_texts_openai")
+    try:
+        client = AzureOpenAI(
+            azure_endpoint=CHAT_MODEL_URL,
+            api_key=OPENAI_API_KEY,
+            api_version=CHAT_MODEL_VERSION,
+        )
+        print("end embed_texts_openai")
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            resp = client.embeddings.create(
+                model="text-embedding-3-large",  # or text-embedding-3-large
+                input=batch
+            )
+            batch_emb = [item.embedding for item in resp.data]
+            embeddings.extend(batch_emb)
+        return embeddings
+    except Exception as e:
+        print(f"Error in embed_texts_openai: {e}")
+        return []
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
@@ -119,12 +182,19 @@ async def upload_pdf(file: UploadFile = File(...)):
     - Create embeddings for chunks
     - Persist store to disk and return a document_id
     """
+    print("sart read")
     contents = await file.read()
+    print("sart extract")
     text = extract_text_from_pdf_bytes(contents)
+    print("end extract")
     if not text:
         raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
-    chunks = chunk_text(text, max_chars=1200, overlap=200)
+    print("start chunk")
+    chunks = chunk_text(text)
+    print("end chunk")
+    print("start embed")
     embeddings_raw = embed_texts_openai(chunks)
+    print("end embed")
     embeddings_np = [np.array(e, dtype=np.float32) for e in embeddings_raw]
 
     doc_id = str(uuid.uuid4())
@@ -158,37 +228,49 @@ def query_document(payload: Dict[str, Any]):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    chunks: List[str] = store["chunks"]
-    embeddings: List[np.ndarray] = store["embeddings"]
+    try:
+       
+        chunks: List[str] = store["chunks"]
+        embeddings: List[np.ndarray] = store["embeddings"]
 
-    top_chunks = get_top_k_chunks(question, chunks, embeddings, top_k=top_k)
-    # Build context string for the LLM
-    context_texts = []
-    for i, item in enumerate(top_chunks):
-        context_texts.append(f"---chunk {item['index']} (score: {item['score']:.4f})---\n{item['chunk']}\n")
+        top_chunks = get_top_k_chunks(question, chunks, embeddings, top_k=top_k)
+        # Build context string for the LLM
+        context_texts = []
+        for i, item in enumerate(top_chunks):
+            context_texts.append(f"---chunk {item['index']} (score: {item['score']:.4f})---\n{item['chunk']}\n")
 
-    # Construct prompt/messages for ChatCompletion
-    system_msg = {
-        "role": "system",
-        "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
-    }
-    user_msg = {
-        "role": "user",
-        "content": f"Context:\n\n{''.join(context_texts)}\nQuestion: {question}\n\nAnswer the question using only the context above and be concise."
-    }
-
-    resp = openai.ChatCompletion.create(
-        model=LLM_MODEL,
-        messages=[system_msg, user_msg],
-        max_tokens=512,
-        temperature=0.2,
-    )
-
-    answer = resp["choices"][0]["message"]["content"].strip()
-    return {
-        "answer": answer,
-        "sources": top_chunks
-    }
+        # Construct prompt/messages for ChatCompletion
+        system_msg = {
+            "role": "system",
+            "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
+        }
+        user_msg = {
+            "role": "user",
+            "content": f"Context:\n\n{''.join(context_texts)}\nQuestion: {question}\n\nAnswer the question using only the context above and be concise."
+        }
+        print("start chat completion")
+        kargs={
+            "model": LLM_MODEL,
+            "messages": [system_msg, user_msg],
+            "max_tokens": 512,
+            "temperature": 0.2,
+        }
+        print("start client chat")
+        client = AzureOpenAI(
+            azure_endpoint=CHAT_MODEL_URL,
+            api_key=OPENAI_API_KEY,
+            api_version=CHAT_MODEL_VERSION,
+        )
+        print("end client chat")
+        resp = client.chat.completions.create(**kargs)
+        print("end chat completion")
+        answer = resp["choices"][0]["message"]["content"].strip()
+        return {
+            "answer": answer,
+            "sources": top_chunks
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 def health():
