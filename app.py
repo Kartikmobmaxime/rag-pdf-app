@@ -8,7 +8,7 @@ from typing import List, Dict, Any
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pypdf import PdfReader
-from openai import AzureOpenAI, ChatCompletion
+from openai import AzureOpenAI
 import re
 
 # ---------------------------
@@ -16,8 +16,8 @@ import re
 # ---------------------------
 # OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_KEY = ""
-CHAT_MODEL_URL="https://legio-mdx0gh9f-eastus2.cognitiveservices.azure.com/"
-CHAT_MODEL_VERSION="2024-12-01-preview"
+CHAT_MODEL_URL = "https://legio-mdx0gh9f-eastus2.cognitiveservices.azure.com/"
+CHAT_MODEL_VERSION = "2024-12-01-preview"
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -29,6 +29,7 @@ LLM_MODEL = "gpt-4o-mini"                # chat model for answers
 # ---------------------------
 # Helper functions
 # ---------------------------
+
 
 def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     """Extract all text from a PDF (simple extraction)."""
@@ -63,6 +64,7 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
 #             break
 #     return chunks
 
+
 def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str]:
     """
     Chunk text by sentences instead of raw characters.
@@ -70,7 +72,7 @@ def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str
     """
     if not text:
         return []
-    
+
     # Split by sentence-ish boundaries
     sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
@@ -82,7 +84,7 @@ def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str
         else:
             # Save the current chunk
             chunks.append(current_chunk.strip())
-            
+
             # Start new chunk, include overlap
             if overlap > 0 and chunks:
                 overlap_text = current_chunk[-overlap:]
@@ -114,7 +116,7 @@ def embed_texts_openai(texts: List[str]) -> List[List[float]]:
     """Call OpenAI embeddings API in batches and return list of vectors."""
     if not texts:
         return []
-    
+
     embeddings: List[List[float]] = []
     batch_size = 50
     print("start embed_texts_openai")
@@ -138,10 +140,12 @@ def embed_texts_openai(texts: List[str]) -> List[List[float]]:
         print(f"Error in embed_texts_openai: {e}")
         return []
 
+
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     if np.linalg.norm(a) == 0 or np.linalg.norm(b) == 0:
         return 0.0
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
 
 def get_top_k_chunks(query: str, chunks: List[str], embeddings: List[np.ndarray], top_k: int = 5):
     """Return top_k (index, score) pairs and their chunk strings for a query."""
@@ -153,12 +157,15 @@ def get_top_k_chunks(query: str, chunks: List[str], embeddings: List[np.ndarray]
     idxs = np.argsort(scores)[::-1][:top_k]
     results = []
     for idx in idxs:
-        results.append({"index": int(idx), "score": float(scores[idx]), "chunk": chunks[int(idx)]})
+        results.append({"index": int(idx), "score": float(
+            scores[idx]), "chunk": chunks[int(idx)]})
     return results
+
 
 def save_store(doc_id: str, store: Dict[str, Any]):
     with open(os.path.join(DATA_DIR, f"{doc_id}_store.pkl"), "wb") as f:
         pickle.dump(store, f)
+
 
 def load_store(doc_id: str) -> Dict[str, Any]:
     path = os.path.join(DATA_DIR, f"{doc_id}_store.pkl")
@@ -171,7 +178,9 @@ def load_store(doc_id: str) -> Dict[str, Any]:
 # FastAPI app & endpoints
 # ---------------------------
 
+
 app = FastAPI(title="Simple RAG PDF Q&A Backend")
+
 
 @app.post("/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -188,7 +197,8 @@ async def upload_pdf(file: UploadFile = File(...)):
     text = extract_text_from_pdf_bytes(contents)
     print("end extract")
     if not text:
-        raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
+        raise HTTPException(
+            status_code=400, detail="No extractable text found in PDF.")
     print("start chunk")
     chunks = chunk_text(text)
     print("end chunk")
@@ -206,6 +216,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     save_store(doc_id, store)
     return {"document_id": doc_id, "num_chunks": len(chunks)}
 
+
 @app.post("/query")
 def query_document(payload: Dict[str, Any]):
     """
@@ -221,7 +232,8 @@ def query_document(payload: Dict[str, Any]):
     question = payload.get("question")
     top_k = int(payload.get("top_k", 5))
     if not doc_id or not question:
-        raise HTTPException(status_code=400, detail="document_id and question are required.")
+        raise HTTPException(
+            status_code=400, detail="document_id and question are required.")
 
     try:
         store = load_store(doc_id)
@@ -229,42 +241,53 @@ def query_document(payload: Dict[str, Any]):
         raise HTTPException(status_code=404, detail="Document not found.")
 
     try:
-       
+
         chunks: List[str] = store["chunks"]
         embeddings: List[np.ndarray] = store["embeddings"]
 
-        top_chunks = get_top_k_chunks(question, chunks, embeddings, top_k=top_k)
+        top_chunks = get_top_k_chunks(
+            question, chunks, embeddings, top_k=top_k)
         # Build context string for the LLM
         context_texts = []
         for i, item in enumerate(top_chunks):
-            context_texts.append(f"---chunk {item['index']} (score: {item['score']:.4f})---\n{item['chunk']}\n")
+            context_texts.append(
+                f"---chunk {item['index']} (score: {item['score']:.4f})---\n{item['chunk']}\n")
 
         # Construct prompt/messages for ChatCompletion
         system_msg = {
             "role": "system",
             "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
         }
+
+        system_msg = {
+            "role": "system",
+            "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
+        }
+
         user_msg = {
             "role": "user",
             "content": f"Context:\n\n{''.join(context_texts)}\nQuestion: {question}\n\nAnswer the question using only the context above and be concise."
         }
+
         print("start chat completion")
-        kargs={
-            "model": LLM_MODEL,
-            "messages": [system_msg, user_msg],
-            "max_tokens": 512,
-            "temperature": 0.2,
-        }
         print("start client chat")
+
         client = AzureOpenAI(
             azure_endpoint=CHAT_MODEL_URL,
             api_key=OPENAI_API_KEY,
             api_version=CHAT_MODEL_VERSION,
         )
         print("end client chat")
-        resp = client.chat.completions.create(**kargs)
+        kargs = {
+            "model": LLM_MODEL,
+            "messages": [system_msg, user_msg],
+            "temperature": 0,
+        }
+
+        # Make the actual API call - you need to unpack kargs with **
+        response = client.chat.completions.create(**kargs)
         print("end chat completion")
-        answer = resp["choices"][0]["message"]["content"].strip()
+        answer = response.choices[0].message.content
         return {
             "answer": answer,
             "sources": top_chunks
@@ -272,6 +295,12 @@ def query_document(payload: Dict[str, Any]):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="127.0.0.1", port=8001, reload=True)
