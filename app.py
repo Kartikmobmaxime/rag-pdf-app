@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from pydantic import BaseModel
 from pypdf import PdfReader
 from openai import AzureOpenAI
 import re
@@ -30,6 +31,9 @@ LLM_MODEL = "gpt-4o-mini"                # chat model for answers
 # Helper functions
 # ---------------------------
 
+class QueryRequest(BaseModel):
+    document_id: str
+    question: str
 
 def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     """Extract all text from a PDF (simple extraction)."""
@@ -40,30 +44,6 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
         if txt:
             pages_text.append(txt)
     return "\n\n".join(pages_text)
-
-# def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> List[str]:
-#     """
-#     Very simple character-based chunking.
-#     - max_chars: how many characters per chunk (~approx tokens).
-#     - overlap: overlapping characters between chunks to preserve context.
-#     """
-#     if not text:
-#         return []
-#     chunks = []
-#     start = 0
-#     length = len(text)
-#     while start < length:
-#         end = min(start + max_chars, length)
-#         chunk = text[start:end].strip()
-#         if chunk:
-#             chunks.append(chunk)
-#         start = end - overlap
-#         if start < 0:
-#             start = 0
-#         if start >= length:
-#             break
-#     return chunks
-
 
 def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str]:
     """
@@ -96,21 +76,6 @@ def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> List[str
         chunks.append(current_chunk.strip())
 
     return chunks
-
-
-# def embed_texts_openai(texts: List[str]) -> List[List[float]]:
-#     """Call OpenAI embeddings API in batches and return list of vectors."""
-#     if not texts:
-#         return []
-#     embeddings: List[List[float]] = []
-#     batch_size = 50
-#     for i in range(0, len(texts), batch_size):
-#         batch = texts[i:i+batch_size]
-#         resp = openai.Embedding.create(model=EMBEDDING_MODEL, input=batch)
-#         batch_emb = [item["embedding"] for item in resp["data"]]
-#         embeddings.extend(batch_emb)
-#     return embeddings
-
 
 def embed_texts_openai(texts: List[str]) -> List[List[float]]:
     """Call OpenAI embeddings API in batches and return list of vectors."""
@@ -218,15 +183,9 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/query")
-def query_document(payload: Dict[str, Any]):
+def query_document(payload: QueryRequest):
     """
-    Query the uploaded document:
-    JSON body:
-    {
-      "document_id": "<id returned by /upload_pdf>",
-      "question": "your question here",
-      "top_k": 5   # optional
-    }
+    Query the uploaded document
     """
     doc_id = payload.get("document_id")
     question = payload.get("question")
@@ -256,12 +215,7 @@ def query_document(payload: Dict[str, Any]):
         # Construct prompt/messages for ChatCompletion
         system_msg = {
             "role": "system",
-            "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
-        }
-
-        system_msg = {
-            "role": "system",
-            "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say you don't know."
+            "content": "You are a helpful assistant. Use the provided document chunks to answer user's question. If the information is not present, say Please ask only questions related to the menu."
         }
 
         user_msg = {
@@ -289,9 +243,7 @@ def query_document(payload: Dict[str, Any]):
         print("end chat completion")
         answer = response.choices[0].message.content
         return {
-            "answer": answer,
-            "sources": top_chunks
-        }
+            "answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
