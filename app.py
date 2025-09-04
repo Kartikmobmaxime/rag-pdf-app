@@ -187,9 +187,9 @@ def query_document(payload: QueryRequest):
     """
     Query the uploaded document
     """
-    doc_id = payload.get("document_id")
-    question = payload.get("question")
-    top_k = int(payload.get("top_k", 5))
+    doc_id = payload.document_id
+    question = payload.question
+    top_k = 5
     if not doc_id or not question:
         raise HTTPException(
             status_code=400, detail="document_id and question are required.")
@@ -243,7 +243,8 @@ def query_document(payload: QueryRequest):
         print("end chat completion")
         answer = response.choices[0].message.content
         return {
-            "answer": answer}
+            "answer": answer
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
